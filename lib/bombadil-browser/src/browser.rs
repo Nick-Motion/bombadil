@@ -1059,12 +1059,25 @@ fn process_event(
             log::debug!("ignoring stale ActionApplied");
             state
         }
-        (InnerState { shared, .. }, InnerEvent::Loaded) => {
+        // Any frame that stops loading sends Loaded. While paused for a
+        // state or between an accepted action and its result, moving to
+        // Running would drop the action and wait on a paused page.
+        (
+            InnerState {
+                kind: Navigating { .. } | Loading | Running,
+                shared,
+            },
+            InnerEvent::Loaded,
+        ) => {
             start_quiescence_timer(shared.generation, context, "loaded")?;
             InnerState {
                 kind: Running,
                 shared,
             }
+        }
+        (state, InnerEvent::Loaded) => {
+            log::debug!("ignoring Loaded during {:?}", state.kind);
+            state
         }
         (
             InnerState { shared, kind },
@@ -1247,10 +1260,19 @@ fn start_quiescence_timer(
                     );
                 }
             }
+            // A failed check (a navigation, a slow page) must not stall the
+            // run, so treat the generation as quiesced.
             Err(error) => {
-                log::error!(
-                    "quiescence timer failed for generation {generation}: {error:#}"
+                log::warn!(
+                    "quiescence check failed for generation {generation}, continuing: {error:#}"
                 );
+                if let Err(error) =
+                    events_tx.send(InnerEvent::Quiesced(generation))
+                {
+                    log::error!(
+                        "failed sending Quiesced message for generation {generation}: {error:#}"
+                    );
+                }
             }
         },
     )
